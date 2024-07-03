@@ -1,74 +1,64 @@
 #include "localization_manager/sbg_localization_processor.h"
 #include <iostream>
 
-SBGLocalizationProcessor::SBGLocalizationProcessor()
-    : Node("sbg_localization_processor")
+SBGLocalizationProcessor::SBGLocalizationProcessor() : nh_("~")
 {
-    ekf_nav_sub_ = this->create_subscription<sbg_driver::msg::SbgEkfNav>(
-        "sbg_ekf_nav", 1,
-        std::bind(&SBGLocalizationProcessor::ekfNavCallback, this, std::placeholders::_1));
-    
-    imu_data_sub_ = this->create_subscription<sbg_driver::msg::SbgImuData>(
-        "sbg_imu_data", 1,
-        std::bind(&SBGLocalizationProcessor::imuDataCallback, this, std::placeholders::_1));
-    
-    ekf_quat_sub_ = this->create_subscription<sbg_driver::msg::SbgEkfQuat>(
-        "sbg_ekf_quat", 1,
-        std::bind(&SBGLocalizationProcessor::ekfQuatCallback, this, std::placeholders::_1));
-    
-    ekf_euler_sub_ = this->create_subscription<sbg_driver::msg::SbgEkfEuler>(
-        "sbg_ekf_euler", 1,
-        std::bind(&SBGLocalizationProcessor::ekfEulerCallback, this, std::placeholders::_1));
+    ekf_nav_sub_ = nh_.subscribe("sbg_ekf_nav", 1, &SBGLocalizationProcessor::ekfNavCallback, this);
+    imu_data_sub_ = nh_.subscribe("sbg_imu_nav", 1, &SBGLocalizationProcessor::imuDataCallback, this);
+    ekf_quat_sub_ = nh_.subscribe("sbg_ekf_quat", 1, &SBGLocalizationProcessor::ekfQuatCallback, this);
+    ekf_euler_sub_ = nh_.subscribe("sbg_ekf_euler", 1, &SBGLocalizationProcessor::ekfEulerCallback, this);
 
-    reference_frame_ = this->declare_parameter<std::string>("reference_frame", "utm");
-    local_reference_frame_ = this->declare_parameter<std::string>("local_reference_frame", "utm_local_gte");
-    target_frame_ = this->declare_parameter<std::string>("target_frame", "base_link");
-    imu_frame_ = this->declare_parameter<std::string>("imu_frame", "sbg");
+    nh_.param<std::string>("reference_frame", reference_frame_,"utm");
+    nh_.param<std::string>("local_reference_frame", local_reference_frame_,"utm_local_gte");
+    nh_.param<std::string>("target_frame", target_frame_,"base_link");
+    nh_.param<std::string>("imu_frame", imu_frame_,"sbg");
     
-    local_ref_latitude_ = this->declare_parameter<double>("local_ref_latitude", 0.0);
-    local_ref_longitude_ = this->declare_parameter<double>("local_ref_longitude", 0.0);
-    local_ref_altitude_ = this->declare_parameter<double>("local_ref_altitude", 0.0);
-    
-    static_tf_broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
-    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+    nh_.param<double>("local_ref_latitude", local_ref_latitude_,0.0);
+    nh_.param<double>("local_ref_longitude", local_ref_longitude_,0.0);
+    nh_.param<double>("local_ref_altitude", local_ref_altitude_,0.0);
 
-    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-    
     init_timer_ = this->create_wall_timer(
         std::chrono::milliseconds(500),
         std::bind(&SBGLocalizationProcessor::initCallback, this));
     
-    odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("odometry", 10);
+    odom_pub_ = nh_.advertise<nav_msgs::msg::Odometry>("odometry", 10);
 
-    timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(100),
-        std::bind(&SBGLocalizationProcessor::publishOdometry, this));
 }
 
+void SBGLocalizationProcessor::run() {
+  ros::Rate rate(10.0);
+  while (ros::ok()){
+    if (!init_complete_) {
+      ROS_INFO("Starting initialization.")
+      initCallback();
+    } else {
+      publishOdometry();
+    }
+    rate.sleep();
+    ros::spinOnce();
+  }
+
+}
 
 void SBGLocalizationProcessor::initCallback() {
-  if (!init_complete_) {
-        //Check if First Msg is Received:
-         if (isFirstMsgReceived()) {
-            //And the check if can transform
-            RCLCPP_INFO(this->get_logger()," ROS time now: %f",this->get_clock()->now().seconds());
-            std::string errStr;
-            if (!tf_buffer_->canTransform(target_frame_, imu_frame_,tf2::TimePointZero,
-                    tf2::durationFromSec(1),&errStr)) {
-                RCLCPP_ERROR(this->get_logger(),"Cannot transform target: %s",errStr.c_str());
-                return;
-            }
+    //Check if First Msg is Received:
+    if (isFirstMsgReceived()) {
+      //And wait for the transform
+      try {
+          listener_.waitForTransform(target_frame_, imu_frame_,ros::Time(0),ros::Duration(5.0));
+      } catch (const tf2::TransformException & ex) {
+          ROS_INFO("Could not transform %s to %s: %s",
+          imu_frame_.c_str(), target_frame_.c_str(), ex.what());
+          return;
+      }
+      initLocalRefFrame();
+      initStaticTFBodyToImu();
+      ROS_INFO("Initialization complete.");
+      init_complete_ = true;
+    } else {
+        ROS_INFO("Waiting for first message to start initialization.");
+    }
 
-            initLocalRefFrame();
-            initStaticTFBodyToImu();
-            RCLCPP_INFO(this->get_logger(), "Initialization complete.");
-            init_complete_ = true;
-        } else {
-            RCLCPP_INFO(this->get_logger(), "Waiting for first message to start initialization.");
-        }
-
-  }
 }
 bool SBGLocalizationProcessor::isFirstMsgReceived() {
   //Check if a first message is received for ekfNav, imuData and ekfQuat
@@ -80,16 +70,13 @@ bool SBGLocalizationProcessor::isFirstMsgReceived() {
 }
 
 void SBGLocalizationProcessor::initStaticTFBodyToImu() {
-
     geometry_msgs::msg::TransformStamped t;
-    //TODO But I want a way for transform before
     try {
-        t = tf_buffer_->lookupTransform(
+        t = tf_buffer_.lookupTransform(
         target_frame_, imu_frame_,
-        tf2::TimePointZero);
+        ros::Time(0));
     } catch (const tf2::TransformException & ex) {
-      RCLCPP_INFO(
-        this->get_logger(), "Could not transform %s to %s: %s",
+      ROS_INFO("Could not transform %s to %s: %s",
         imu_frame_.c_str(), target_frame_.c_str(), ex.what());
       return;
     }
@@ -117,14 +104,14 @@ void SBGLocalizationProcessor::initLocalRefFrame() {
   pose.orientation.z = 0;
   pose.orientation.w = 1;
   fillTransform(reference_frame_, local_reference_frame_, pose, transform);
-  static_tf_broadcaster_->sendTransform(transform);
+  static_tf_broadcaster_.sendTransform(transform);
 }
 
 
 void SBGLocalizationProcessor::fillTransform(const std::string &ref_parent_frame_id, const std::string &ref_child_frame_id, const geometry_msgs::msg::Pose &ref_pose, geometry_msgs::msg::TransformStamped &refTransformStamped)
 {
 
-  refTransformStamped.header.stamp = this->get_clock()->now();
+  refTransformStamped.header.stamp = ros::Time::now();
   refTransformStamped.header.frame_id = ref_parent_frame_id;
   refTransformStamped.child_frame_id = ref_child_frame_id;
   refTransformStamped.transform.translation.x = ref_pose.position.x;
@@ -165,7 +152,7 @@ void SBGLocalizationProcessor::publishOdometry()
     geometry_msgs::msg::TransformStamped transform_stamped;
     fillTransform(local_reference_frame_, target_frame_, odom_msg.pose.pose, transform_stamped);
 
-    tf_broadcaster_->sendTransform(transform_stamped);
+    tf_broadcaster_.sendTransform(transform_stamped);
 }
     
 void SBGLocalizationProcessor::convertNEDtoENU(const geometry_msgs::msg::Vector3& ned, geometry_msgs::msg::Vector3& enu) {
@@ -191,7 +178,7 @@ void SBGLocalizationProcessor::getOrientationENUfromSBG(tf2::Quaternion& orienta
 //Then, how are we dealing with the flip in TF, in conversion, ....
 void SBGLocalizationProcessor::computeOdometryFromSbg(nav_msgs::msg::Odometry &odom_msg) {
   
-  odom_msg.header.stamp = this->get_clock()->now();
+  odom_msg.header.stamp = ros::Time::now();
   odom_msg.header.frame_id = local_reference_frame_;
   odom_msg.child_frame_id = target_frame_;
 
@@ -266,8 +253,9 @@ void SBGLocalizationProcessor::fillCovariance(nav_msgs::msg::Odometry &odom_msg)
 
 int main(int argc, char ** argv)
 {
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<SBGLocalizationProcessor>());
-  rclcpp::shutdown();
+  ros::init(argc, argv);
+  SBGLocalizationProcessor loc;
+  loc.run();
+  ros::shutdown();
   return 0;
 }
