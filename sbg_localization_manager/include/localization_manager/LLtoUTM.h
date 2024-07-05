@@ -46,7 +46,7 @@ namespace utm_utils {
         // 'Z' is an error flag, the Latitude is outside the UTM limits
 	    else LetterDesignator = 'Z';
 	    return LetterDesignator;
-    };
+    }
 
     /*
     * Modification of gps_common::LLtoUTM() to use a constant UTM zone.
@@ -112,7 +112,7 @@ namespace utm_utils {
     {
         UTMNorthing += 10000000.0; //10000000 meter offset for southern hemisphere
     }
-    };
+    }
 
 #if 0
 //NOT TESTED, adapted from gps_common 
@@ -172,7 +172,7 @@ namespace utm_utils {
                                         *D*D*D*D*D/120)/cos(phi1Rad);
         Long = LongOrigin + Long * DEGREES_PER_RADIAN;
 
-    };
+    }
 #endif
     void initUTM(double Lat, double Long, double altitude, UTM0& utm0) {
         int zoneNumber;
@@ -199,7 +199,8 @@ namespace utm_utils {
         utm0.zone = zoneNumber;
         utm0.altitude = altitude;
         LLtoUTM(Lat, Long, utm0.zone, utm0.northing, utm0.easting);
-    };
+    }
+
     double computeMeridian(int zone_number) 
     {
     return (zone_number == 0) ? 0.0 : (zone_number - 1) * 6.0 - 177.0;
@@ -210,5 +211,5 @@ namespace utm_utils {
         return angle * M_PI / 180.0;
     }
 
-};
+}
 #endif  // LL_TO_UTM_H

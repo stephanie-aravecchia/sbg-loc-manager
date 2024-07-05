@@ -1,0 +1,19 @@
+<launch>
+  <arg name="local_lat" default="49.104547"/>
+  <arg name="local_long" default="6.215606"/>
+  <arg name="local_alt" default="193"/>
+  <node pkg="sbg_localization_manager" name="sbg_localization_processor" type="sbg_localization_processor" output="screen">
+    <remap from="~/sbg_ekf_nav" to="/sbg/ekf_nav"/>
+    <remap from="~/sbg_ekf_quat" to="/sbg/ekf_quat"/>
+    <remap from="~/sbg_ekf_euler" to="/sbg/ekf_euler"/>
+    <remap from="~/sbg_imu_nav" to="/sbg/imu_data"/>
+    <param name="reference_frame" type="string" value="utm"/>
+    <param name="local_reference_frame" type="string" value="utm_local_gte"/>
+    <param name="target_frame" type="string" value="base_link"/>
+    <param name="imu_frame" type="string" value="sbg"/>
+    <param name="local_ref_latitude" value="$(arg local_lat)"/>
+    <param name="local_ref_longitude" value="$(arg local_long)"/>
+    <param name="local_ref_altitude" value="$(arg local_alt)"/>
+    <param name="is_imu_child" value="False"/>
+  </node>
+</launch>

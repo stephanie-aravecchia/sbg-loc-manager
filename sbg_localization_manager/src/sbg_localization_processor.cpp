@@ -16,21 +16,20 @@ SBGLocalizationProcessor::SBGLocalizationProcessor() : nh_("~")
     nh_.param<double>("local_ref_latitude", local_ref_latitude_,0.0);
     nh_.param<double>("local_ref_longitude", local_ref_longitude_,0.0);
     nh_.param<double>("local_ref_altitude", local_ref_altitude_,0.0);
+    nh_.param<bool>("is_imu_child", is_imu_child_,true);
 
-    init_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(500),
-        std::bind(&SBGLocalizationProcessor::initCallback, this));
-    
-    odom_pub_ = nh_.advertise<nav_msgs::msg::Odometry>("odometry", 10);
+    odom_pub_ = nh_.advertise<nav_msgs::Odometry>("odometry", 10);
 
 }
 
 void SBGLocalizationProcessor::run() {
+  ros::Rate init_rate(1.0);
   ros::Rate rate(10.0);
   while (ros::ok()){
     if (!init_complete_) {
-      ROS_INFO("Starting initialization.")
+      //ROS_INFO("Starting initialization.");
       initCallback();
+      init_rate.sleep();
     } else {
       publishOdometry();
     }
@@ -45,14 +44,21 @@ void SBGLocalizationProcessor::initCallback() {
     if (isFirstMsgReceived()) {
       //And wait for the transform
       try {
-          listener_.waitForTransform(target_frame_, imu_frame_,ros::Time(0),ros::Duration(5.0));
+          ROS_INFO("Wait for Transfom from %s to %s",imu_frame_.c_str(), target_frame_.c_str());
+          tf_listener_.waitForTransform(target_frame_, imu_frame_,ros::Time(0),ros::Duration(5.0));
       } catch (const tf2::TransformException & ex) {
           ROS_INFO("Could not transform %s to %s: %s",
           imu_frame_.c_str(), target_frame_.c_str(), ex.what());
           return;
       }
+      //If the value is not valid, we wait
+      try {
+        initStaticTFBodyToImu();
+      } catch (const tf2::TransformException & ex) {
+          ROS_INFO("InitStaticTFBodyToImu failed: %s",ex.what());
+          return;
+      }
       initLocalRefFrame();
-      initStaticTFBodyToImu();
       ROS_INFO("Initialization complete.");
       init_complete_ = true;
     } else {
@@ -70,21 +76,34 @@ bool SBGLocalizationProcessor::isFirstMsgReceived() {
 }
 
 void SBGLocalizationProcessor::initStaticTFBodyToImu() {
-    geometry_msgs::msg::TransformStamped t;
+  ROS_INFO("Initialize static body to imu.");
+    geometry_msgs::TransformStamped t_msg;
+    tf::StampedTransform t;
     try {
-        t = tf_buffer_.lookupTransform(
+        tf_listener_.lookupTransform(
         target_frame_, imu_frame_,
-        ros::Time(0));
+        ros::Time(0), t);
     } catch (const tf2::TransformException & ex) {
       ROS_INFO("Could not transform %s to %s: %s",
         imu_frame_.c_str(), target_frame_.c_str(), ex.what());
-      return;
+      throw ex;
     }
-    imu_static_transform_ = t.transform;
+    tf::transformStampedTFToMsg(t, t_msg);
+    
+    //Check if the quaternion is valid, else, nothing works:
+    bool valid = std::abs((t_msg.transform.rotation.w * t_msg.transform.rotation.w
+                          + t_msg.transform.rotation.x * t_msg.transform.rotation.x
+                          + t_msg.transform.rotation.y * t_msg.transform.rotation.y
+                          + t_msg.transform.rotation.z * t_msg.transform.rotation.z) - 1.0f) < 10e-3;
+    if (!valid) {
+      throw tf2::TransformException("Invalid Quaternion");
+    }
+    imu_static_transform_ = t_msg.transform;
 }
 //If the local ref is provided, we use it as the local ref frame
 //Else, we set it to the last value in the msg at the time of initialization
 void SBGLocalizationProcessor::initLocalRefFrame() {
+  ROS_INFO("Initialize and broadcast static tf local ref frame.");
   // if at least one is zero, no ref is provided
   // we initialize with current value 
   if ((local_ref_latitude_ * local_ref_longitude_ * local_ref_altitude_) < 1)  {
@@ -93,9 +112,9 @@ void SBGLocalizationProcessor::initLocalRefFrame() {
     utm_utils::initUTM(local_ref_latitude_, local_ref_longitude_, local_ref_altitude_, utm0_);
   }
   // Publish UTM initial transformation.
-  // UTM is always x: easting, y: northing, we assure z: altitude
-  geometry_msgs::msg::TransformStamped transform;
-  geometry_msgs::msg::Pose pose;
+  // x: easting, y: northing, we assure z: altitude
+  geometry_msgs::TransformStamped transform;
+  geometry_msgs::Pose pose;
   pose.position.x = utm0_.easting;
   pose.position.y = utm0_.northing;
   pose.position.z = utm0_.altitude;
@@ -104,11 +123,11 @@ void SBGLocalizationProcessor::initLocalRefFrame() {
   pose.orientation.z = 0;
   pose.orientation.w = 1;
   fillTransform(reference_frame_, local_reference_frame_, pose, transform);
-  static_tf_broadcaster_.sendTransform(transform);
+  tf_static_broadcaster_.sendTransform(transform);
 }
 
 
-void SBGLocalizationProcessor::fillTransform(const std::string &ref_parent_frame_id, const std::string &ref_child_frame_id, const geometry_msgs::msg::Pose &ref_pose, geometry_msgs::msg::TransformStamped &refTransformStamped)
+void SBGLocalizationProcessor::fillTransform(const std::string &ref_parent_frame_id, const std::string &ref_child_frame_id, const geometry_msgs::Pose &ref_pose, geometry_msgs::TransformStamped &refTransformStamped)
 {
 
   refTransformStamped.header.stamp = ros::Time::now();
@@ -124,38 +143,56 @@ void SBGLocalizationProcessor::fillTransform(const std::string &ref_parent_frame
 
 }
 
-void SBGLocalizationProcessor::ekfNavCallback(const sbg_driver::msg::SbgEkfNav::SharedPtr msg)
+void SBGLocalizationProcessor::ekfNavCallback(const sbg_driver::SbgEkfNavConstPtr msg)
 {
     ekf_nav_data_ = *msg;
 }
 
-void SBGLocalizationProcessor::imuDataCallback(const sbg_driver::msg::SbgImuData::SharedPtr msg)
+void SBGLocalizationProcessor::imuDataCallback(const sbg_driver::SbgImuDataConstPtr msg)
 {
     imu_data_ = *msg;
 }
 
-void SBGLocalizationProcessor::ekfQuatCallback(const sbg_driver::msg::SbgEkfQuat::SharedPtr msg)
+void SBGLocalizationProcessor::ekfQuatCallback(const sbg_driver::SbgEkfQuatConstPtr msg)
 {
     ekf_quat_data_ = *msg;
 }
-void SBGLocalizationProcessor::ekfEulerCallback(const sbg_driver::msg::SbgEkfEuler::SharedPtr msg)
+void SBGLocalizationProcessor::ekfEulerCallback(const sbg_driver::SbgEkfEulerConstPtr msg)
 {
     ekf_euler_data_ = *msg;
 }
 
 void SBGLocalizationProcessor::publishOdometry()
 {
-    nav_msgs::msg::Odometry odom_msg = nav_msgs::msg::Odometry();
+    nav_msgs::Odometry odom_msg = nav_msgs::Odometry();
     computeOdometryFromSbg(odom_msg);
-    odom_pub_->publish(odom_msg);
+    odom_pub_.publish(odom_msg);
 
-    geometry_msgs::msg::TransformStamped transform_stamped;
-    fillTransform(local_reference_frame_, target_frame_, odom_msg.pose.pose, transform_stamped);
-
+    geometry_msgs::TransformStamped transform_stamped;
+    //If the imu frame is child of base_link, default behavior:
+    if (is_imu_child_) {
+      fillTransform(local_reference_frame_, target_frame_, odom_msg.pose.pose, transform_stamped);
+    } else {
+      //we need to compute and broadcast the transform between local and sbg
+      setTransformWithImuParent(odom_msg, transform_stamped);
+    }
     tf_broadcaster_.sendTransform(transform_stamped);
 }
-    
-void SBGLocalizationProcessor::convertNEDtoENU(const geometry_msgs::msg::Vector3& ned, geometry_msgs::msg::Vector3& enu) {
+
+void SBGLocalizationProcessor::setTransformWithImuParent(nav_msgs::Odometry &odom_msg, geometry_msgs::TransformStamped &transform_stamped) {
+  tf::Transform sensor_pose;
+  tf::Pose robot_pose;
+  tf::Pose t_robot_to_sensor;
+  tf::poseMsgToTF(odom_msg.pose.pose, robot_pose);
+  tf::transformMsgToTF(imu_static_transform_, t_robot_to_sensor);
+
+  sensor_pose = robot_pose * t_robot_to_sensor;
+  geometry_msgs::Pose pose;
+  tf::poseTFToMsg(sensor_pose, pose);
+  fillTransform(local_reference_frame_, imu_frame_, pose, transform_stamped);
+}
+
+void SBGLocalizationProcessor::convertNEDtoENU(const geometry_msgs::Vector3& ned, geometry_msgs::Vector3& enu) {
   enu.x = ned.x;
   enu.y = -ned.y;
   enu.z = M_PI_2 - ned.z;
@@ -163,20 +200,20 @@ void SBGLocalizationProcessor::convertNEDtoENU(const geometry_msgs::msg::Vector3
 
 
 //Convert the SBG Quaternion (in NED by default on the sensor) into ENU Euler Angles
-void SBGLocalizationProcessor::getOrientationENUfromSBG(tf2::Quaternion& orientation) {
+void SBGLocalizationProcessor::getOrientationENUfromSBG(tf::Quaternion& orientation) {
   //Convert quaternion to Euler (NED)
-  tf2::Quaternion ned_quat;
-  tf2::fromMsg(ekf_quat_data_.quaternion, ned_quat);
-  tf2::Matrix3x3 m(ned_quat);
-  geometry_msgs::msg::Vector3 ned_euler, enu_euler;
+  tf::Quaternion ned_quat;
+  tf::quaternionMsgToTF(ekf_quat_data_.quaternion, ned_quat);
+  tf::Matrix3x3 m(ned_quat);
+  geometry_msgs::Vector3 ned_euler, enu_euler;
   m.getRPY(ned_euler.x, ned_euler.y, ned_euler.z);
   convertNEDtoENU(ned_euler,enu_euler);
   orientation.setRPY(enu_euler.x, enu_euler.y, enu_euler.z);
 }
 
 //We assume the SBG sensor is installed as required, X pointing in the robot forward direction, Z downward
-//Then, how are we dealing with the flip in TF, in conversion, ....
-void SBGLocalizationProcessor::computeOdometryFromSbg(nav_msgs::msg::Odometry &odom_msg) {
+//We also assume the sbg_driver is set to NED
+void SBGLocalizationProcessor::computeOdometryFromSbg(nav_msgs::Odometry &odom_msg) {
   
   odom_msg.header.stamp = ros::Time::now();
   odom_msg.header.frame_id = local_reference_frame_;
@@ -189,33 +226,42 @@ void SBGLocalizationProcessor::computeOdometryFromSbg(nav_msgs::msg::Odometry &o
 
 }
 
-void SBGLocalizationProcessor::getRobotPoseFromSbg(nav_msgs::msg::Odometry &odom_msg) {
+void SBGLocalizationProcessor::getIMUPose(geometry_msgs::PoseStamped &sensor_pose) {
   //First, we convert the coordinates of the sensor in UTM
   double utm_northing, utm_easting;
   utm_utils::LLtoUTM(ekf_nav_data_.latitude,ekf_nav_data_.longitude,utm0_.zone,utm_northing,utm_easting);
  
   //Then, we get the orientation of the SBG sensor, in NED
-  tf2::Quaternion orientation;
+  tf::Quaternion orientation;
   getOrientationENUfromSBG(orientation);
 
   //We construct the pose of the sensor, in the local UTM frame
-  geometry_msgs::msg::PoseStamped sensor_pose;
   sensor_pose.pose.position.x = utm_easting - utm0_.easting;;
   sensor_pose.pose.position.y = utm_northing - utm0_.northing;
   sensor_pose.pose.position.z = ekf_nav_data_.altitude - utm0_.altitude;
-  
-  //And finally, we can construct the Pose of the robot (base_frame) in the local UTM Frame
-  //We assume there is a translation between the imu and the robot
-  //We also assume the sensor is set as recommanded, z down, but that rotation is ignored here, 
-  //because the position and orientation are already in ENU
-  odom_msg.pose.pose.position.x = sensor_pose.pose.position.x + imu_static_transform_.translation.x;
-  odom_msg.pose.pose.position.y = sensor_pose.pose.position.y + imu_static_transform_.translation.y;
-  odom_msg.pose.pose.position.z = sensor_pose.pose.position.z + imu_static_transform_.translation.z;
-  odom_msg.pose.pose.orientation = tf2::toMsg(orientation);
+
+  tf::quaternionTFToMsg(orientation, sensor_pose.pose.orientation);
 
 }
 
-void SBGLocalizationProcessor::getRobotTwistFromSbg(nav_msgs::msg::Odometry &odom_msg) {
+void SBGLocalizationProcessor::getRobotPoseFromSbg(nav_msgs::Odometry &odom_msg) {
+  
+  geometry_msgs::PoseStamped sensor_pose;
+  getIMUPose(sensor_pose);
+  //And finally, we can construct the Pose of the robot (base_frame) in the local UTM Frame
+  //We assume there is a translation between the imu and the robot
+  //We also assume the sensor is set as recommanded, z down, but that rotation is ignored here, 
+  //because the position and orientation in the odom msg are already in ENU
+
+  odom_msg.pose.pose.position.x = sensor_pose.pose.position.x + imu_static_transform_.translation.x;
+  odom_msg.pose.pose.position.y = sensor_pose.pose.position.y + imu_static_transform_.translation.y;
+  odom_msg.pose.pose.position.z = sensor_pose.pose.position.z + imu_static_transform_.translation.z;
+  
+  odom_msg.pose.pose.orientation = sensor_pose.pose.orientation;
+
+}
+
+void SBGLocalizationProcessor::getRobotTwistFromSbg(nav_msgs::Odometry &odom_msg) {
   //We assume the Twist of the robot is simply the Twist of the IMU after a rotation of Pi around x
   odom_msg.twist.twist.linear.x      = ekf_nav_data_.velocity.x;
   odom_msg.twist.twist.linear.y      = -ekf_nav_data_.velocity.y;
@@ -225,7 +271,7 @@ void SBGLocalizationProcessor::getRobotTwistFromSbg(nav_msgs::msg::Odometry &odo
   odom_msg.twist.twist.angular.z     = -imu_data_.gyro.z;
 }
   
-void SBGLocalizationProcessor::fillCovariance(nav_msgs::msg::Odometry &odom_msg) {
+void SBGLocalizationProcessor::fillCovariance(nav_msgs::Odometry &odom_msg) {
   // Fill the covariance as in SBG driver
   // Compute convergence angle.
   double longitudeRad      = utm_utils::degToRadD(ekf_nav_data_.longitude);
@@ -253,7 +299,7 @@ void SBGLocalizationProcessor::fillCovariance(nav_msgs::msg::Odometry &odom_msg)
 
 int main(int argc, char ** argv)
 {
-  ros::init(argc, argv);
+  ros::init(argc, argv, "sbg_localization_processor");
   SBGLocalizationProcessor loc;
   loc.run();
   ros::shutdown();

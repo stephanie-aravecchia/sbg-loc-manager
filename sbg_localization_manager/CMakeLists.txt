@@ -6,7 +6,7 @@ add_compile_options(-Wall -Wextra -Wpedantic -ggdb -O3)
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
-find_package(catkin REQUIRED roscpp sbg_driver nav_msgs geometry_msgs tf2)
+find_package(catkin REQUIRED roscpp sbg_driver nav_msgs geometry_msgs tf tf2 tf2_ros)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -99,7 +99,7 @@ find_package(catkin REQUIRED roscpp sbg_driver nav_msgs geometry_msgs tf2)
 catkin_package(
   INCLUDE_DIRS include
   #LIBRARIES sbg_loc_manager
-  CATKIN_DEPENDS roscpp sbg_driver nav_msgs geometry_msgs tf2
+  CATKIN_DEPENDS roscpp sbg_driver nav_msgs geometry_msgs tf tf2 tf2_ros
   #DEPENDS
 )
 
@@ -124,7 +124,7 @@ include_directories(
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
-add_executable(${PROJECT_NAME}_node src/localization_solution_manager.cpp)
+add_executable(sbg_localization_processor src/sbg_localization_processor.cpp)
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the
@@ -138,7 +138,7 @@ add_executable(${PROJECT_NAME}_node src/localization_solution_manager.cpp)
 
 ## Specify libraries to link a library or executable target against
  
-target_link_libraries(${PROJECT_NAME}_node
+target_link_libraries(sbg_localization_processor
    ${catkin_LIBRARIES}
  )
 
